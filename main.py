@@ -111,7 +111,7 @@ class JsonLoader:
                         time.sleep(3)
                         continue
                 for page in data:
-                    tmp.add(page["page"])
+                    tmp.add(page["page"].rstrip('/'))
             self._list = list(tmp)
             self._count = len(self._list)
             logger.info(f'loaded {self._count} hosts')    
@@ -219,7 +219,7 @@ async def worker(worker_id: int,sem: asyncio.Semaphore):
                             # logger.warning(f'[{worker_id}]  {work_item.url} - {status}, proxy: {work_item.proxy} ({work_item.request_count})')
                             work_item.fail_count = 0
                             await rcounter.incrementAlive()
-                        else: # error 400-500 are not generate a lot of data, so ignore it
+                        elif status != 403: # error 400-500 are not generate a lot of data, so ignore it
                             work_item.fail_count += 1
                             await rcounter.incrementNoResponse()
                             # logger.debug(f'[{worker_id}] {work_item.url} - {status}, proxy: {work_item.proxy} ({work_item.request_count})')
@@ -228,6 +228,9 @@ async def worker(worker_id: int,sem: asyncio.Semaphore):
                                 proxy_list = proxies.getAll()
                                 work_item.proxy = proxy_list[proxy_index]
                                 proxy_index += 1
+                        else:
+                            await rcounter.incrementAlive()
+                            break
                         await asyncio.sleep(0)
 
 
